@@ -13,6 +13,12 @@ on:
         default: main
         type: string
 
+# The repository defaults workflow tokens to read-only, so the jobs that attach
+# assets have to ask. Granted per job rather than at the top so nothing else in
+# the pipeline can write to the repository.
+permissions:
+  contents: read
+
 jobs:
   preflight:
     name: Preflight
@@ -85,6 +91,8 @@ jobs:
   build:
     name: Build ${{ matrix.label }}
     needs: preflight
+    permissions:
+      contents: write
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -325,6 +333,8 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [preflight, build]
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
