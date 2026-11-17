@@ -1,0 +1,229 @@
+name: Machine Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "OpenCoStudio version / asset tag, e.g. 0.6.2-rc.1 (not the DeepSeek version)"
+        required: true
+        type: string
+      ref:
+        description: "Source branch or full 40-character commit SHA"
+        required: true
+        default: machine/linux-vm
+        type: string
+      publish_machine:
+        description: "Build/sign native Linux payloads and attach to a draft prerelease"
+        required: true
+        default: false
+        type: boolean
+      deepseek_run_id:
+        description: "Reviewed DeepSeek run ID (required only for publish_machine)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: machine-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.source.outputs.version }}
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+      - name: Validate version and resolve source commit once
+        id: source
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+          PUBLISH_MACHINE: ${{ inputs.publish_machine }}
+          DEEPSEEK_RUN_ID: ${{ inputs.deepseek_run_id }}
+        run: |
+          set -euo pipefail
+          version="$(node machine/payload/workflow.ts version "$RAW_VERSION")"
+          if [[ "$PUBLISH_MACHINE" == true && ! "$DEEPSEEK_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'publish_machine requires the reviewed DeepSeek workflow run ID.' >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # Pass 1: build immutable inputs for source review. Never signs or uploads release assets.
+  deepseek:
+    if: ${{ !inputs.publish_machine }}
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+            arch: x64
+            host: x86_64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+            arch: arm64
+            host: aarch64
+            platform: linux/arm64
+    env:
+      TARGET: ${{ matrix.target }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      EXPECTED_HOST: ${{ matrix.host }}
+      PLATFORM: ${{ matrix.platform }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.preflight.outputs.commit }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+      - name: Build locked DeepSeek bundle on native hardware
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_HOST"
+          test "$(node -p process.arch)" = "$EXPECTED_ARCH"
+          builder="$(node machine/payload/workflow.ts builder "$TARGET")"
+          mkdir -p machine/payload/out/deepseek
+          docker pull --platform "$PLATFORM" "$builder"
+          docker run --rm --platform "$PLATFORM" \
+            --mount "type=bind,src=$PWD,dst=/work,readonly" \
+            --mount "type=bind,src=$PWD/machine/payload/out/deepseek,dst=/work/machine/payload/out/deepseek" \
+            --tmpfs /tmp --env npm_config_cache=/tmp/npm-cache \
+            --env EXPECTED_ARCH --env TARGET --env VERSION --workdir /work \
+            "$builder" sh -eu -c '
+              test "$(node -p process.arch)" = "$EXPECTED_ARCH"
+              test "$(node -p process.platform)" = linux
+              node --version
+              npm --version
+              node machine/payload/prepare-deepseek.ts build "$TARGET" "v$VERSION"
+            '
+      - name: Retain archive and target record for review
+        uses: actions/upload-artifact@v7
+        with:
+          name: deepseek-${{ matrix.target }}
+          path: |
+            machine/payload/out/deepseek/deepseek-*-${{ matrix.target }}.tar.gz
+            machine/payload/out/deepseek/${{ matrix.target }}.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  # Pass 2: consumes the exact prior run reviewed into the source catalogue, never a rebuild.
+  machine:
+    if: ${{ inputs.publish_machine }}
+    needs: preflight
+    permissions:
+      actions: read
+      contents: write
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+            arch: x64
+            host: x86_64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+            arch: arm64
+            host: aarch64
+    env:
+      TARGET: ${{ matrix.target }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      EXPECTED_HOST: ${{ matrix.host }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.preflight.outputs.commit }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+      - name: Download exact reviewed DeepSeek inputs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPO: ${{ github.repository }}
+          DEEPSEEK_RUN_ID: ${{ inputs.deepseek_run_id }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$RELEASE_REPO/actions/runs/$DEEPSEEK_RUN_ID" \
+            --jq '.path == ".github/workflows/machine.yml" and .event == "workflow_dispatch" and .conclusion == "success"')" = true
+          for target in linux-arm64 linux-x64; do
+            gh run download "$DEEPSEEK_RUN_ID" --repo "$RELEASE_REPO" \
+              --name "deepseek-$target" --dir machine/payload/out/deepseek
+          done
+          node machine/payload/workflow.ts review "$VERSION"
+      - name: Build native Linux payload from frozen inputs
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_HOST"
+          test "$(node -p process.arch)" = "$EXPECTED_ARCH"
+          node machine/payload/workflow.ts builder "$TARGET"
+          node machine/payload/build.ts "$TARGET"
+      - name: Sign target release and verify against embedded roots
+        env:
+          OPENCOSTUDIO_RELEASE_PRIVATE_KEY: ${{ secrets.OPENCOSTUDIO_RELEASE_PRIVATE_KEY }}
+          OPENCOSTUDIO_RELEASE_KEY_ID: ${{ secrets.OPENCOSTUDIO_RELEASE_KEY_ID }}
+        run: |
+          set -euo pipefail
+          export OPENCOSTUDIO_RELEASE_NATIVE="$PWD/machine/payload/out/bootstrap-$TARGET/bin/opencostudio-native"
+          node machine/payload/release.ts "$TARGET" "$RUNNER_TEMP/machine-releases"
+      - name: Independently verify and collect target assets
+        run: |
+          set -euo pipefail
+          node machine/payload/workflow.ts package "$TARGET" "$VERSION" \
+            "$RUNNER_TEMP/machine-releases" "$RUNNER_TEMP/release-assets"
+      - name: Attach assets to draft prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if ! gh release view "$tag" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            # The two architectures may race to create the draft. Recheck below either way.
+            gh release create "$tag" --repo "$RELEASE_REPO" --draft --prerelease --latest=false \
+              --title "OpenCoStudio $tag" \
+              --notes 'Native Linux payload candidates; machine image and promotion evidence pending.' \
+              || gh release view "$tag" --repo "$RELEASE_REPO" >/dev/null
+          fi
+          test "$(gh release view "$tag" --repo "$RELEASE_REPO" \
+            --json isDraft,isPrerelease --jq '.isDraft and .isPrerelease')" = true
+          # No clobber: published catalogue digests must keep naming immutable bytes.
+          gh release upload "$tag" --repo "$RELEASE_REPO" "$RUNNER_TEMP/release-assets/"*
