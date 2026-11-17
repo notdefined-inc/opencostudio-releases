@@ -13,10 +13,16 @@ on:
         default: machine/linux-vm
         type: string
       publish_machine:
-        description: "Build/sign native Linux payloads and attach to a draft prerelease"
+        description: "Build/sign arm64 machine images and x64 payloads for a draft prerelease"
         required: true
         default: false
         type: boolean
+      machine_target:
+        description: "Publication target (DeepSeek input pass always builds both)"
+        required: true
+        default: all
+        type: choice
+        options: [all, linux-arm64, linux-x64]
       deepseek_run_id:
         description: "Reviewed DeepSeek run ID (required only for publish_machine)"
         required: false
@@ -40,6 +46,7 @@ jobs:
     outputs:
       version: ${{ steps.source.outputs.version }}
       commit: ${{ steps.source.outputs.commit }}
+      matrix: ${{ steps.source.outputs.matrix }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -58,6 +65,7 @@ jobs:
           RAW_VERSION: ${{ inputs.version }}
           PUBLISH_MACHINE: ${{ inputs.publish_machine }}
           DEEPSEEK_RUN_ID: ${{ inputs.deepseek_run_id }}
+          MACHINE_TARGET: ${{ inputs.machine_target }}
         run: |
           set -euo pipefail
           version="$(node machine/payload/workflow.ts version "$RAW_VERSION")"
@@ -67,6 +75,7 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(node machine/payload/workflow.ts matrix "$MACHINE_TARGET")" >> "$GITHUB_OUTPUT"
 
   # Pass 1: build immutable inputs for source review. Never signs or uploads release assets.
   deepseek:
@@ -145,19 +154,10 @@ jobs:
       actions: read
       contents: write
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 180
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: linux-x64
-            arch: x64
-            host: x86_64
-          - runner: ubuntu-24.04-arm
-            target: linux-arm64
-            arch: arm64
-            host: aarch64
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     env:
       TARGET: ${{ matrix.target }}
       EXPECTED_ARCH: ${{ matrix.arch }}
@@ -196,14 +196,26 @@ jobs:
           test "$(node -p process.arch)" = "$EXPECTED_ARCH"
           node machine/payload/workflow.ts builder "$TARGET"
           node machine/payload/build.ts "$TARGET"
+      - name: Build native arm64 kernel and image from this job's payload
+        if: matrix.target == 'linux-arm64'
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          bash machine/kernel/build.sh arm64
+          node scripts/build-machine-image.ts "$RUNNER_TEMP/machine-image"
       - name: Sign target release and verify against embedded roots
         env:
           OPENCOSTUDIO_RELEASE_PRIVATE_KEY: ${{ secrets.OPENCOSTUDIO_RELEASE_PRIVATE_KEY }}
           OPENCOSTUDIO_RELEASE_KEY_ID: ${{ secrets.OPENCOSTUDIO_RELEASE_KEY_ID }}
         run: |
           set -euo pipefail
+          umask 077
           export OPENCOSTUDIO_RELEASE_NATIVE="$PWD/machine/payload/out/bootstrap-$TARGET/bin/opencostudio-native"
-          node machine/payload/release.ts "$TARGET" "$RUNNER_TEMP/machine-releases"
+          args=("$TARGET" "$RUNNER_TEMP/machine-releases")
+          if [[ "$TARGET" == linux-arm64 ]]; then
+            args+=("$RUNNER_TEMP/machine-image" "$PWD/machine/kernel/out/arm64")
+          fi
+          node machine/payload/release.ts "${args[@]}"
       - name: Independently verify and collect target assets
         run: |
           set -euo pipefail
@@ -220,10 +232,22 @@ jobs:
             # The two architectures may race to create the draft. Recheck below either way.
             gh release create "$tag" --repo "$RELEASE_REPO" --draft --prerelease --latest=false \
               --title "OpenCoStudio $tag" \
-              --notes 'Native Linux payload candidates; machine image and promotion evidence pending.' \
+              --notes 'Signed machine and native Linux candidates; packaged boot and promotion evidence pending.' \
               || gh release view "$tag" --repo "$RELEASE_REPO" >/dev/null
           fi
           test "$(gh release view "$tag" --repo "$RELEASE_REPO" \
             --json isDraft,isPrerelease --jq '.isDraft and .isPrerelease')" = true
-          # No clobber: published catalogue digests must keep naming immutable bytes.
-          gh release upload "$tag" --repo "$RELEASE_REPO" "$RUNNER_TEMP/release-assets/"*
+          for asset in "$RUNNER_TEMP/release-assets/"*; do
+            name="${asset##*/}"
+            # The on-request archive already exists when adding an image to a payload-only draft.
+            # Reuse only identical bytes; machine archives/reports are always new, immutable assets.
+            if [[ "$name" == deepseek-* ]] && gh release view "$tag" --repo "$RELEASE_REPO" \
+              --json assets --jq '.assets[].name' | grep -Fx "$name" >/dev/null; then
+              mkdir -p "$RUNNER_TEMP/existing-assets"
+              gh release download "$tag" --repo "$RELEASE_REPO" --pattern "$name" \
+                --dir "$RUNNER_TEMP/existing-assets"
+              cmp "$asset" "$RUNNER_TEMP/existing-assets/$name"
+            else
+              gh release upload "$tag" --repo "$RELEASE_REPO" "$asset"
+            fi
+          done

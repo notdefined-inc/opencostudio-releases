@@ -32,7 +32,7 @@ After a release, update the download links in `README.md` — asset names carry 
 
 ## Machine inputs and native Linux candidates
 
-**Machine Release** (`machine.yml`) is manual and separate from `release.yml`, which is unchanged.
+**Machine Release** (`machine.yml`) is manual and runs before desktop packaging.
 The source ref is resolved once to a commit. Native x64 runs on `ubuntu-24.04`; native arm64 runs
 on `ubuntu-24.04-arm`, with host and Node architecture checks. Actions use the same version pins
 as the desktop workflow. No workflow commits or pushes source.
@@ -78,7 +78,7 @@ architecture-independent dependency graph. Local Docker Hub access failed with `
 x64 registry pull/platform execution remains unverified until CI; Docker checks the digest on
 pull and Node asserts its native architecture before building. No new dependency is resolved.
 
-### Second pass: opt-in signed native Linux payloads
+### Second pass: opt-in signed machine / native Linux releases
 
 Commit/push the reviewed catalogue in the source repository, with `apps/server/package.json`
 matching the intended version. Dispatch against that exact new source SHA and the first run ID:
@@ -90,27 +90,104 @@ gh workflow run machine.yml --repo notdefined-inc/opencostudio-releases --ref ma
 ```
 
 `deepseek` is skipped. Both `machine` jobs retrieve the reviewed archives/records, refuse
-catalogue/lock/tag/version mismatches, build the native payload with frozen inputs, sign using
+catalogue/lock/tag/version mismatches and build the native payload with frozen inputs. Native
+arm64 then runs `machine/kernel/build.sh arm64` and `scripts/build-machine-image.ts` from the
+payload that job just built; x64 remains payload-only. Each target signs exactly once using
 the secrets **only in the signing step**, and run native `release verify` with compiled roots
 during signing and independently before collecting assets. The verifier is built from source in
 the payload build. Only these jobs request `contents: write` (plus `actions: read` for downloads).
 All source checkouts disable credential persistence.
 
-Each job attaches a target-specific `opencostudio-machine-<version>-<target>.tar.gz`, its JSON
+`machine_target=all` (default), `linux-arm64`, or `linux-x64` selects publication jobs; the
+DeepSeek input pass always builds both architectures. Each selected job attaches
+`opencostudio-machine-<version>-linux-arm64-image.tar.gz` (complete machine) or
+`opencostudio-machine-<version>-linux-x64.tar.gz` (native payload), its JSON
 size/digest/commit report and the exact standalone DeepSeek archive. Inside each release tar,
 `<target>/` contains its manifest/signature, payload, notices, signed provenance with component
-accounting, `sizes.json` and frozen input/build reports. Target manifests cannot overwrite each
+accounting, `sizes.json` and frozen input/build reports. The arm64 unit also includes `kernel`,
+`initrd`, `system.raw.gz`, `data.template` and `kernel-source.txt` (GPL text, full config and
+corresponding-source references). No logical `data.raw` is shipped. Target manifests cannot overwrite each
 other. DeepSeek stays outside the offline payload and release tar; signed provenance records its
 digest. Additional size/input reports are evidence, not separate signed admission inputs.
 
 The tag `v<version>` must be a **draft prerelease**: the workflow creates one if needed and
-refuses other existing releases. It never promotes, marks latest or clobbers assets. A failed
+refuses other existing releases. It never promotes, marks latest or clobbers machine assets. An already attached standalone
+DeepSeek archive is reused only after downloading and comparing its exact bytes. A failed
 matrix can leave partial draft assets; resolve those explicitly or choose a new reviewed candidate
 version before rerunning. Avoid running Desktop Release on that tag during assembly.
 
-This is **partial spec 01 task 2**: native shared payload assembly, separate signed manifests,
-component reports and generated notices are wired. The arm64 kernel/system/data-template image,
-kernel corresponding source/config retention, signed/notarized Mac packaging, final DMG/ZIP
-measurement, notice/source audit, clean rebuild and boot/promotion acceptance are not completed.
-The workflow has not been dispatched or production-signed locally. Source `docs/RELEASING.md`
-contains the full acceptance checklist; spec 01 tasks 2/4 remain unchecked.
+The existing **v0.7.0-rc.1** draft already has payload-only arm64/x64 assets (machine run
+44142568982). The full image uses a distinct `-linux-arm64-image` filename so those remain
+immutable. After the source changes and workflow changes are committed/pushed by the owner,
+run from the source checkout:
+
+```sh
+SOURCE_SHA="$(git rev-parse HEAD)" # full pushed source SHA containing the DMG change
+gh workflow run machine.yml --repo notdefined-inc/opencostudio-releases --ref main \
+  -f version=0.7.0-rc.1 -f ref="$SOURCE_SHA" -f publish_machine=true \
+  -f deepseek_run_id=44110290201 -f machine_target=linux-arm64
+```
+
+This does not rerun x64 or overwrite the prior arm64 payload. The reviewed input run must still
+be retained; if expired, follow the source's reviewed-input recovery process with exact retained
+bytes. A retry that encounters an existing image/report refuses replacement.
+
+## Mac DMG with the machine inside
+
+Only macOS arm64 changes in `release.yml`: it requires the same-version draft prerelease,
+downloads the `-linux-arm64-image.tar.gz`, confines extraction to fixed regular files, and builds
+its Mac verifier from source. Rust checks compiled trust roots, signature, every artifact, payload
+archive and sparse template; the admitted release must match the desktop version and exact source
+commit. The downloaded payload supplies no host verifier or runtime. After success, the job sets
+`OPENCOSTUDIO_MACHINE_RELEASE_DIR`; packaging verifies source/staged copies again. The job runs
+the existing pinned patched-vfkit build and retains its digest gate. Python's standard-library
+tar reader and existing Node/Rust/tar tooling add no package or lockfile change. The arm64 job has
+90 minutes; other platform build paths/timeouts are unchanged.
+
+After the machine pass succeeds, using the **same SOURCE_SHA**:
+
+```sh
+gh workflow run release.yml --repo notdefined-inc/opencostudio-releases --ref main \
+  -f version=0.7.0-rc.1 -f ref="$SOURCE_SHA"
+```
+
+There is **no desktop platform selector**. This runs preflight and **macOS arm64, macOS x64,
+Linux x64 and Windows x64**, then the existing publication jobs after successful builds. Intel
+Mac packaging is currently refused by source (there is no Intel Mac machine). That entry will
+fail, keeping the release in draft; the successful arm64 job can still attach its DMG. Do not
+interpret a draft DMG or green packaging job as completed boot/promotion acceptance.
+
+The app retains existing ad-hoc signing and is **not notarized**: no Developer ID exists. Expect
+macOS's unidentified-developer prompt; use System Settings → Privacy & Security → Open Anyway.
+No new Apple certificate/notarization requirement was added.
+
+The final Mac step records actual **DMG bytes and SHA-256** in its job summary and attaches
+`<installer>.dmg.size.json`. The same report records source/release identity and first-launch
+app-data baseline. No new DMG was built locally, so its size is **unmeasured**. Component budgets
+are payload ≤750 MiB compressed, kernel + compressed system ≤1 GiB and expanded system ≤3 GiB;
+template/notices/desktop shell are additional bytes, so these are not a DMG size estimate.
+
+First launch keeps a private copy of all signed machine inputs (M), expands one system disk (S),
+and restores allocated XFS extents (D): expect approximately **M + S + D** of app data, plus
+profile/logs/work/caches. The report gives M + S. The installed app and downloaded DMG are
+additional space; updates retain previous releases. Data is **2 TiB logical, sparse**, with only
+allocated blocks consuming disk. Keep **2 GiB host free** beyond installation/activation needs.
+Measure allocated use with `du -sk`, not the raw disk's apparent length.
+
+On first launch Electron finds unpacked resources, bundled vfkit/workers and its own Electron
+runtime. Both crypto workers use Electron's Node mode. Working directories live owner-only in
+app data (runtime sockets may use owner-only `/private/tmp/ocs-*`); system/data never enter the
+app bundle. Packaged builds ignore the development image override; existing data survives
+relaunch. The existing launch shell shows starting/connecting and plain recovery actions.
+
+Check the downloaded draft DMG on a fresh Apple Silicon profile: drag to Applications, open via
+Gatekeeper, launch without terminal/settings, reach ready + connected, use pinned Codex/Claude,
+create work, quit and reopen. Inspect unpacked signed image files/workers/vfkit, nested signature
+and virtualization entitlement, owner-only app-data modes, sparse allocated data/system use and
+unchanged bundle contents. Record DMG bytes/hash and before/after `du -sk`. Exercise low-space
+recovery/Try again only with a disposable profile.
+
+Spec 01 tasks 2/4 stay unchecked until actual CI artifacts, clean rebuild/boot, notices and exact
+corresponding-source audit, installer/disk measurements and promotion acceptance are observed.
+No Docker/vfkit, production signing, upload, push or dispatch ran during this implementation.
+The source guide and spec Results record narrow tests and external acceptance limits.

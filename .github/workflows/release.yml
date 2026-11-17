@@ -43,9 +43,11 @@ jobs:
       - id: release_meta
         name: Resolve release version
         shell: bash
+        env:
+          RAW_VERSION: ${{ inputs.version }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            raw="${{ github.event.inputs.version }}"
+            raw="$RAW_VERSION"
           else
             raw="${GITHUB_REF_NAME}"
           fi
@@ -94,7 +96,7 @@ jobs:
     permissions:
       contents: write
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.platform == 'mac' && matrix.arch == 'arm64' && 90 || 30 }}
     strategy:
       fail-fast: false
       matrix:
@@ -143,6 +145,35 @@ jobs:
 
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+
+      - name: Download and verify signed arm64 machine from the same draft version
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(uname -m)" = arm64
+          tag="v$VERSION"
+          test "$(gh release view "$tag" --repo "$RELEASE_REPO" \
+            --json isDraft,isPrerelease --jq '.isDraft and .isPrerelease')" = true
+          archive="opencostudio-machine-$VERSION-linux-arm64-image.tar.gz"
+          python3 -m unittest scripts/test_extract_machine_release.py
+          mkdir -p "$RUNNER_TEMP/machine-download"
+          gh release download "$tag" --repo "$RELEASE_REPO" --pattern "$archive" \
+            --dir "$RUNNER_TEMP/machine-download"
+          source="$RUNNER_TEMP/machine-download/linux-arm64"
+          node scripts/prepare-machine-release.ts "$RUNNER_TEMP/machine-download/$archive" \
+            "$VERSION" "$source" "$(git rev-parse HEAD)"
+          echo "OPENCOSTUDIO_MACHINE_RELEASE_DIR=$source" >> "$GITHUB_ENV"
+
+      - name: Build pinned patched vfkit for the arm64 Mac bundle
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64'
+        shell: bash
+        run: bash machine/vfkit/build.sh machine/vfkit/out
 
       - name: Build desktop artifact
         shell: bash
@@ -252,6 +283,13 @@ jobs:
             fi
           fi
 
+      - name: Record arm64 DMG download bytes
+        if: matrix.platform == 'mac' && matrix.arch == 'arm64'
+        shell: bash
+        run: |
+          node scripts/report-machine-dmg-size.ts release-publish "$OPENCOSTUDIO_MACHINE_RELEASE_DIR" \
+            >> "$GITHUB_STEP_SUMMARY"
+
       # Installers go straight to the release, never through Actions artifact
       # storage.
       #
@@ -276,7 +314,8 @@ jobs:
           fi
           shopt -s nullglob
           installers=(release-publish/*.dmg release-publish/*.zip \
-            release-publish/*.AppImage release-publish/*.exe release-publish/*.blockmap)
+            release-publish/*.AppImage release-publish/*.exe release-publish/*.blockmap \
+            release-publish/*.dmg.size.json)
           if [[ ${#installers[@]} -eq 0 ]]; then
             echo "No installers produced for ${{ matrix.label }}" >&2
             exit 1
