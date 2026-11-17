@@ -46,7 +46,7 @@ jobs:
         with:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ inputs.ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ssh-key: ${{ secrets.SOURCE_REPO_SSH_KEY }}
           persist-credentials: false
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -100,7 +100,7 @@ jobs:
         with:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.preflight.outputs.commit }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ssh-key: ${{ secrets.SOURCE_REPO_SSH_KEY }}
           persist-credentials: false
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -169,7 +169,7 @@ jobs:
         with:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.preflight.outputs.commit }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ssh-key: ${{ secrets.SOURCE_REPO_SSH_KEY }}
           persist-credentials: false
       - name: Setup Node
         uses: actions/setup-node@v6

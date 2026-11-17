@@ -21,7 +21,7 @@ Configuration lives here, not in the source repository:
 | Kind | Name | Purpose |
 |---|---|---|
 | Variable | `SOURCE_REPO` | The private source repository |
-| Secret | `SOURCE_REPO_TOKEN` | Read access to the private source |
+| Secret | `SOURCE_REPO_SSH_KEY` | Read-only deploy key for the private source (deploy key "opencostudio-releases CI (read-only)" on that repository; replaced the expired `SOURCE_REPO_TOKEN` on 2026-11-17) |
 | Secret | `OPENCOSTUDIO_RELEASE_PRIVATE_KEY` | Machine manifest signer, Ed25519 PKCS#8 PEM; signing step only |
 | Secret | `OPENCOSTUDIO_RELEASE_KEY_ID` | Embedded public-root ID (`release-1`) |
 

@@ -38,7 +38,7 @@ jobs:
         with:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ inputs.ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ssh-key: ${{ secrets.SOURCE_REPO_SSH_KEY }}
 
       - id: release_meta
         name: Resolve release version
@@ -125,7 +125,7 @@ jobs:
         with:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.preflight.outputs.ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ssh-key: ${{ secrets.SOURCE_REPO_SSH_KEY }}
           fetch-depth: 0
 
       - name: Setup Bun
@@ -305,7 +305,7 @@ jobs:
         with:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.preflight.outputs.ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ssh-key: ${{ secrets.SOURCE_REPO_SSH_KEY }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -343,7 +343,7 @@ jobs:
         with:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.preflight.outputs.ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ssh-key: ${{ secrets.SOURCE_REPO_SSH_KEY }}
 
       - name: Setup Node
         uses: actions/setup-node@v6
