@@ -12,6 +12,10 @@ on:
         required: false
         default: main
         type: string
+      mac_arm64_draft:
+        description: "Build the Apple Silicon DMG for an existing draft prerelease"
+        default: false
+        type: boolean
 
 # The repository defaults workflow tokens to read-only, so the jobs that attach
 # assets have to ask. Granted per job rather than at the top so nothing else in
@@ -22,8 +26,8 @@ permissions:
 jobs:
   preflight:
     name: Preflight
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    runs-on: ${{ inputs.mac_arm64_draft && 'macos-14' || 'ubuntu-24.04' }}
+    timeout-minutes: 20
     outputs:
       version: ${{ steps.release_meta.outputs.version }}
       tag: ${{ steps.release_meta.outputs.tag }}
@@ -87,6 +91,13 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # Integration tests exercise both the development and release binaries.
+      - name: Build the native helper for tests
+        working-directory: native/opencostudio-native
+        run: |
+          cargo build --locked
+          cargo build --release --locked
+
       - name: Test
         run: bun run test
 
@@ -100,27 +111,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - label: macOS arm64
-            runner: macos-14
-            platform: mac
-            target: dmg
-            arch: arm64
-          - label: macOS x64
-            runner: macos-15-intel
-            platform: mac
-            target: dmg
-            arch: x64
-          - label: Linux x64
-            runner: ubuntu-24.04
-            platform: linux
-            target: AppImage
-            arch: x64
-          - label: Windows x64
-            runner: windows-2022
-            platform: win
-            target: nsis
-            arch: x64
+        include: >-
+          ${{ fromJSON(inputs.mac_arm64_draft &&
+            '[{"label":"macOS arm64","runner":"macos-14","platform":"mac","target":"dmg","arch":"arm64"}]' ||
+            '[{"label":"macOS arm64","runner":"macos-14","platform":"mac","target":"dmg","arch":"arm64"},
+              {"label":"macOS x64","runner":"macos-15-intel","platform":"mac","target":"dmg","arch":"x64"},
+              {"label":"Linux x64","runner":"ubuntu-24.04","platform":"linux","target":"AppImage","arch":"x64"},
+              {"label":"Windows x64","runner":"windows-2022","platform":"win","target":"nsis","arch":"x64"}]') }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -308,7 +305,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+          if [[ "${{ inputs.mac_arm64_draft }}" == true ]]; then
+            test "$(gh release view "$TAG" --repo "$RELEASE_REPO" \
+              --json isDraft,isPrerelease --jq '.isDraft and .isPrerelease')" = true
+          elif ! gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$RELEASE_REPO" --draft \
               --title "OpenCoStudio ${TAG}" --notes "Build in progress."
           fi
@@ -325,6 +325,7 @@ jobs:
       # Only the updater manifests travel as artifacts: kilobytes, and the
       # publish job has to merge the two macOS ones before they are usable.
       - name: Upload updater manifests
+        if: ${{ !inputs.mac_arm64_draft }}
         uses: actions/upload-artifact@v7
         with:
           name: manifests-${{ matrix.platform }}-${{ matrix.arch }}
@@ -334,7 +335,7 @@ jobs:
 
   publish_cli:
     name: Publish CLI to npm
-    if: ${{ vars.OPENCOSTUDIO_PUBLISH_CLI == '1' }}
+    if: ${{ !inputs.mac_arm64_draft && vars.OPENCOSTUDIO_PUBLISH_CLI == '1' }}
     needs: [preflight, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -371,6 +372,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
+    if: ${{ !inputs.mac_arm64_draft }}
     needs: [preflight, build]
     permissions:
       contents: write

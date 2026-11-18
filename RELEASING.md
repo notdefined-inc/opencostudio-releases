@@ -134,7 +134,7 @@ bytes. A retry that encounters an existing image/report refuses replacement.
 
 ## Mac DMG with the machine inside
 
-Only macOS arm64 changes in `release.yml`: it requires the same-version draft prerelease,
+The macOS arm64 build in `release.yml` requires the same-version draft prerelease,
 downloads the `-linux-arm64-image.tar.gz`, confines extraction to fixed regular files, and builds
 its Mac verifier from source. Rust checks compiled trust roots, signature, every artifact, payload
 archive and sparse template; the admitted release must match the desktop version and exact source
@@ -148,14 +148,14 @@ After the machine pass succeeds, using the **same SOURCE_SHA**:
 
 ```sh
 gh workflow run release.yml --repo notdefined-inc/opencostudio-releases --ref main \
-  -f version=0.7.0-rc.1 -f ref="$SOURCE_SHA"
+  -f version=0.7.0-rc.1 -f ref="$SOURCE_SHA" -f mac_arm64_draft=true
 ```
 
-There is **no desktop platform selector**. This runs preflight and **macOS arm64, macOS x64,
-Linux x64 and Windows x64**, then the existing publication jobs after successful builds. Intel
-Mac packaging is currently refused by source (there is no Intel Mac machine). That entry will
-fail, keeping the release in draft; the successful arm64 job can still attach its DMG. Do not
-interpret a draft DMG or green packaging job as completed boot/promotion acceptance.
+This runs lint, typecheck and tests on Apple Silicon after building the Rust helper. The build
+attaches the installer and size report to the existing draft prerelease. Release publication,
+CLI publication and updater manifests are disabled in this mode. With the default input, the
+workflow uses Linux preflight and the full platform matrix. Test the installed DMG on a fresh
+Apple Silicon profile before promoting the draft.
 
 The app retains existing ad-hoc signing and is **not notarized**: no Developer ID exists. Expect
 macOS's unidentified-developer prompt; use System Settings → Privacy & Security → Open Anyway.
