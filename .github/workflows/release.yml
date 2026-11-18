@@ -26,7 +26,7 @@ permissions:
 jobs:
   preflight:
     name: Preflight
-    runs-on: ${{ inputs.mac_arm64_draft && 'macos-14' || 'ubuntu-24.04' }}
+    runs-on: ${{ inputs.mac_arm64_draft && 'macos-15' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     outputs:
       version: ${{ steps.release_meta.outputs.version }}
@@ -113,8 +113,8 @@ jobs:
       matrix:
         include: >-
           ${{ fromJSON(inputs.mac_arm64_draft &&
-            '[{"label":"macOS arm64","runner":"macos-14","platform":"mac","target":"dmg","arch":"arm64"}]' ||
-            '[{"label":"macOS arm64","runner":"macos-14","platform":"mac","target":"dmg","arch":"arm64"},
+            '[{"label":"macOS arm64","runner":"macos-15","platform":"mac","target":"dmg","arch":"arm64"}]' ||
+            '[{"label":"macOS arm64","runner":"macos-15","platform":"mac","target":"dmg","arch":"arm64"},
               {"label":"macOS x64","runner":"macos-15-intel","platform":"mac","target":"dmg","arch":"x64"},
               {"label":"Linux x64","runner":"ubuntu-24.04","platform":"linux","target":"AppImage","arch":"x64"},
               {"label":"Windows x64","runner":"windows-2022","platform":"win","target":"nsis","arch":"x64"}]') }}
